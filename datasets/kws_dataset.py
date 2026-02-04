@@ -2,6 +2,7 @@ import pandas as pd
 import torch
 import soundfile as sf
 import torchaudio
+import os
 from torch.utils.data import Dataset
 
 def text_to_char_ids(text, char2idx):
@@ -27,6 +28,12 @@ class KWSDataset(Dataset):
             self.df = self.df[
                 self.df["audio_path"].str.contains(f"folder {folder_id}")
             ].reset_index(drop=True)
+        
+        # Convert absolute paths to relative paths (for cross-platform compatibility)
+        # Extracts path after 'data/audio/' and makes it relative
+        self.df["audio_path"] = self.df["audio_path"].apply(
+            lambda x: self._convert_to_relative_path(x)
+        )
 
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -48,6 +55,23 @@ class KWSDataset(Dataset):
         )
 
         print(f"Loaded samples: {len(self.df)}")
+
+    def _convert_to_relative_path(self, path):
+        """
+        Convert absolute Windows path to relative path.
+        Example: C:\\Users\\...\\data\\audio\\folder 1\\... 
+        -> data/audio/folder 1/...
+        """
+        # Normalize path separators
+        path = str(path).replace('\\', '/')
+        
+        # Find 'data/audio' in the path and extract from there
+        if 'data/audio' in path:
+            idx = path.find('data/audio')
+            return path[idx:]
+        
+        # If already relative or doesn't contain data/audio, return as is
+        return path
 
     def __len__(self):
         return len(self.df)
