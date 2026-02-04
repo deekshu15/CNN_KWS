@@ -19,23 +19,41 @@ print(f"CUDA available: {torch.cuda.is_available()}")
 print(f"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
 ```
 
-### Step 2: Upload/Mount Data
+### Step 2: Mount Google Drive & Setup Data
 
-**Option A: Mount Google Drive**
+**Your Drive Structure:**
+```
+Google Drive/
+└── KWS_DATA/
+    ├── audio/
+    │   ├── folder 1/
+    │   ├── folder 2/
+    │   ├── ...
+    │   └── folder 12/
+    └── metadata_fixed.csv
+```
+
+**Mount and Setup:**
 ```python
+# Mount Google Drive
 from google.colab import drive
 drive.mount('/content/drive')
 
-# Navigate to your project
+# Clone GitHub repo
 import os
-os.chdir('/content/drive/MyDrive/CNN Model')
-```
+os.chdir('/content')
+!git clone https://github.com/deekshu15/CNN_KWS.git
+os.chdir('/content/CNN_KWS')
 
-**Option B: Upload ZIP**
-```python
-# Upload CNN Model.zip and extract
-!unzip "CNN Model.zip"
-%cd "CNN Model"
+# Link to your Drive data
+!rm -rf data
+!mkdir -p data
+!ln -s /content/drive/MyDrive/KWS_DATA/audio data/audio
+!ln -s /content/drive/MyDrive/KWS_DATA/metadata_fixed.csv data/metadata_fixed.csv
+
+# Verify
+!ls data/
+!ls data/audio/
 ```
 
 ### Step 3: Install Dependencies
