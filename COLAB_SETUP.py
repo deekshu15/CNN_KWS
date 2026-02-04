@@ -4,14 +4,15 @@ Google Colab Setup Script
 
 Run this in a Colab notebook cell to set up your training environment.
 
-Your Google Drive structure:
+Your Google Drive structure (ONLY AUDIO FILES NEEDED):
 KWS_DATA/
-├── audio/
-│   ├── folder 1/
-│   ├── folder 2/
-│   ├── ...
-│   └── folder 12/
-└── metadata_fixed.csv
+└── audio/
+    ├── folder 1/
+    ├── folder 2/
+    ├── ...
+    └── folder 12/
+
+Note: metadata_fixed.csv is already in the GitHub repo!
 
 """
 
@@ -48,9 +49,9 @@ os.chdir('/content/CNN_KWS')
 # IMPORTANT: Update the path below if your Drive structure is different
 DRIVE_DATA_PATH = '/content/drive/MyDrive/KWS_DATA'
 
-# Create symbolic links
+# Create symbolic link to audio folder only
+# (metadata_fixed.csv already exists in the GitHub repo)
 !ln -s "$DRIVE_DATA_PATH/audio" data/audio
-!ln -s "$DRIVE_DATA_PATH/metadata_fixed.csv" data/metadata_fixed.csv
 
 # =====================
 # STEP 5: Verify Setup
@@ -68,7 +69,7 @@ else:
     print("❌ Audio folder not found!")
 
 if os.path.exists('data/metadata_fixed.csv'):
-    print("✅ Metadata file linked successfully")
+    print("✅ Metadata file found (from GitHub repo)")
     # Check metadata
     import pandas as pd
     df = pd.read_csv('data/metadata_fixed.csv')

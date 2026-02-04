@@ -5,9 +5,9 @@ This is a template for training your KWS model in Google Colab.
 ## 📋 Prerequisites
 
 Before running this notebook:
-1. Upload your data to Google Drive:
+1. Upload audio data to Google Drive:
    - `KWS_DATA/audio/` (all 12 folders)
-   - `KWS_DATA/metadata_fixed.csv`
+   - Note: metadata_fixed.csv is already in GitHub repo, no need to upload
 2. Enable GPU: Runtime → Change runtime type → GPU (T4 recommended)
 
 ---
@@ -42,9 +42,8 @@ os.chdir('/content/CNN_KWS')
 # Create data directory
 !mkdir -p data
 
-# Link to your Drive data (update path if needed)
+# Link audio from Drive (metadata already in repo)
 !ln -s /content/drive/MyDrive/KWS_DATA/audio data/audio
-!ln -s /content/drive/MyDrive/KWS_DATA/metadata_fixed.csv data/metadata_fixed.csv
 
 # Verify
 print("Checking data structure...")

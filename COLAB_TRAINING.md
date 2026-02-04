@@ -25,12 +25,13 @@ print(f"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else
 ```
 Google Drive/
 └── KWS_DATA/
-    ├── audio/
-    │   ├── folder 1/
-    │   ├── folder 2/
-    │   ├── ...
-    │   └── folder 12/
-    └── metadata_fixed.csv
+    └── audio/
+        ├── folder 1/
+        ├── folder 2/
+        ├── ...
+        └── folder 12/
+
+Note: metadata_fixed.csv is in the GitHub repo, no need to upload to Drive
 ```
 
 **Mount and Setup:**
@@ -45,11 +46,8 @@ os.chdir('/content')
 !git clone https://github.com/deekshu15/CNN_KWS.git
 os.chdir('/content/CNN_KWS')
 
-# Link to your Drive data
-!rm -rf data
-!mkdir -p data
+# Link audio from Drive (metadata already in repo)
 !ln -s /content/drive/MyDrive/KWS_DATA/audio data/audio
-!ln -s /content/drive/MyDrive/KWS_DATA/metadata_fixed.csv data/metadata_fixed.csv
 
 # Verify
 !ls data/
