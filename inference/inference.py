@@ -1,95 +1,94 @@
 import torch
-import soundfile as sf
 import torchaudio
+import soundfile as sf
+import numpy as np
 
-from models.kws_model import KWSModel
-from datasets.kws_dataset import KWSDataset, text_to_char_ids
+from CNN_KWS.models.kws_model import KWSModel
 
-# =====================
-# CONFIG
-# =====================
 
-CHECKPOINT_PATH = "checkpoints/folder_1/model.pt"   # change folder if needed
-METADATA_PATH   = "data/metadata_fixed.csv"
+class KWSInferencer:
+    def __init__(
+        self,
+        checkpoint_path,
+        char2idx,
+        device="cpu",
+        sample_rate=16000,
+        n_mels=80,
+        hop_length=160,
+        max_seconds=10.0,
+        threshold=0.5,
+    ):
+        self.device = device
+        self.sample_rate = sample_rate
+        self.hop_length = hop_length
+        self.threshold = threshold
+        self.max_len = int(sample_rate * max_seconds)
 
-AUDIO_PATH = (
-    "data/audio/folder 1/"
-    "AdityaBDhruva_XxYc2jHvSbhNXVeHgBDpDKhK9hU2/DATASETS/00JS.wav"
-)
+        # model
+        self.model = KWSModel(len(char2idx)).to(device)
+        self.model.load_state_dict(
+            torch.load(checkpoint_path, map_location=device)
+        )
+        self.model.eval()
 
-KEYWORD = "FRIGHTEN"
+        self.char2idx = char2idx
 
-SAMPLE_RATE = 16000
-HOP_LENGTH = 160
-THRESHOLD = 0.5
-DEVICE = "cpu"
+        self.mel = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_mels=n_mels,
+            hop_length=hop_length,
+        ).to(device)
 
-# =====================
-# Load dataset (for vocab)
-# =====================
+    def _load_audio(self, wav_path):
+        wav, sr = sf.read(wav_path)
+        wav = torch.tensor(wav, dtype=torch.float32)
 
-dataset = KWSDataset(METADATA_PATH)
-char2idx = dataset.char2idx
+        if wav.ndim == 2:
+            wav = wav.mean(dim=1)
 
-# =====================
-# Load model
-# =====================
+        if sr != self.sample_rate:
+            wav = torchaudio.functional.resample(
+                wav, sr, self.sample_rate
+            )
 
-model = KWSModel(vocab_size=len(char2idx))
-model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-model.to(DEVICE)
-model.eval()
+        wav = wav[:self.max_len]
+        if wav.shape[0] < self.max_len:
+            wav = torch.nn.functional.pad(
+                wav, (0, self.max_len - wav.shape[0])
+            )
 
-# =====================
-# Load audio
-# =====================
+        return wav.to(self.device)
 
-wav, sr = sf.read(AUDIO_PATH)
-wav = torch.tensor(wav, dtype=torch.float32)
+    def _keyword_to_ids(self, keyword):
+        ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
+        return torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(self.device)
 
-if wav.ndim == 2:
-    wav = wav.mean(dim=1)
+    @torch.no_grad()
+    def infer(self, wav_path, keyword):
+        """
+        Returns:
+            (start_time, end_time) in seconds
+            or None if keyword not detected
+        """
+        wav = self._load_audio(wav_path)
+        mel = self.mel(wav).transpose(0, 1).unsqueeze(0)  # [1, T, 80]
 
-if sr != SAMPLE_RATE:
-    wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+        kw = self._keyword_to_ids(keyword)
+        kw_len = torch.tensor([kw.shape[1]]).to(self.device)
 
-mel = torchaudio.transforms.MelSpectrogram(
-    sample_rate=SAMPLE_RATE,
-    n_mels=80,
-    hop_length=HOP_LENGTH
-)(wav)
+        logits = self.model(mel, kw, kw_len)
+        probs = torch.sigmoid(logits)[0].cpu().numpy()
 
-mel = mel.transpose(0, 1).unsqueeze(0).to(DEVICE)  # [1, T, 80]
+        # thresholding
+        active = probs > self.threshold
+        if not active.any():
+            return None
 
-# =====================
-# Encode keyword
-# =====================
+        indices = np.where(active)[0]
+        start_frame = indices[0]
+        end_frame = indices[-1]
 
-kw_ids = torch.tensor(
-    text_to_char_ids(KEYWORD, char2idx),
-    dtype=torch.long
-).unsqueeze(0).to(DEVICE)
+        start_time = start_frame * self.hop_length / self.sample_rate
+        end_time = end_frame * self.hop_length / self.sample_rate
 
-kw_len = torch.tensor([kw_ids.shape[1]]).to(DEVICE)
-
-# =====================
-# Inference
-# =====================
-
-with torch.no_grad():
-    logits = model(mel, kw_ids, kw_len)
-    scores = torch.sigmoid(logits)[0]
-
-# =====================
-# Post-processing
-# =====================
-
-active = scores > THRESHOLD
-
-if active.any():
-    frames = torch.where(active)[0]
-    start = frames[0].item() * HOP_LENGTH / SAMPLE_RATE
-    end   = frames[-1].item() * HOP_LENGTH / SAMPLE_RATE
-    print(f"✅ Keyword FOUND from {start:.2f}s to {end:.2f}s")
-else:
-    print("❌ Keyword NOT FOUND")
+        return round(start_time, 3), round(end_time, 3)
