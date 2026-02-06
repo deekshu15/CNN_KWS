@@ -1,46 +1,38 @@
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
 
 def collate(batch):
     """
-    Enforces the correct contract regardless of dataset mistakes.
+    batch: list of (mel [T, F], kw [L], labels [T])
     """
 
-    mels, kws, labels = [], [], []
+    mels = []
+    kws = []
+    kw_lens = []
+    labels = []
+    masks = []
 
-    for mel, a, b in batch:
-        # auto-detect which is label vs keyword
-        if a.max() <= 1.0 and b.max() > 1:
-            lbl, kw = a, b
-        elif b.max() <= 1.0 and a.max() > 1:
-            lbl, kw = b, a
-        else:
-            raise RuntimeError("Cannot disambiguate kw vs labels")
+    max_T = max(b[0].shape[0] for b in batch)
+
+    for mel, kw, lbl in batch:
+        T = mel.shape[0]
 
         mels.append(mel)
         kws.append(kw)
+        kw_lens.append(len(kw))
+
         labels.append(lbl)
 
-    B = len(mels)
-    maxT = max(m.shape[0] for m in mels)
-    maxK = max(len(k) for k in kws)
+        mask = torch.zeros(max_T)
+        mask[:T] = 1.0
+        masks.append(mask)
 
-    M = torch.zeros(B, maxT, 80)
-    Y = torch.zeros(B, maxT)
-    MASK = torch.zeros(B, maxT)
+    mels = pad_sequence(mels, batch_first=True)      # [B, T, F]
+    labels = pad_sequence(labels, batch_first=True)  # [B, T]
+    masks = torch.stack(masks)                        # [B, T]
 
-    K = torch.zeros(B, maxK, dtype=torch.long)
-    KL = torch.tensor([len(k) for k in kws], dtype=torch.long)
+    kws = pad_sequence(kws, batch_first=True)         # [B, L]
+    kw_lens = torch.tensor(kw_lens)
 
-    for i in range(B):
-        T = mels[i].shape[0]
-        M[i, :T] = mels[i]
-        Y[i, :T] = labels[i]
-        MASK[i, :T] = 1.0
-        K[i, : len(kws[i])] = kws[i]
-
-    # FINAL GUARANTEE
-    assert Y.max() <= 1.0
-    assert K.max() > 1
-
-    return M, K, KL, Y, MASK
+    return mels, kws, kw_lens, labels, masks
