@@ -1,96 +1,67 @@
 import os
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-from datasets.kws_dataset import KWSDataset
-from models.kws_model import KWSModel
+from CNN_KWS.datasets.kws_dataset import KWSDataset
+from CNN_KWS.utils.collate import collate
+from CNN_KWS.models.kws_model import KWSModel
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 4
-EPOCHS = 1
-LR = 1e-3
 
-def collate(batch):
-    mels, kws, labels = zip(*batch)
 
-    maxT = max(x.shape[0] for x in mels)
-    maxL = max(len(k) for k in kws)
+def train_one_folder(
+    folder_id,
+    model,
+    optimizer,
+    char2idx,
+    epochs=2,
+    batch_size=4,
+):
+    meta = f"/content/metadata_folder{folder_id}_fixed.csv"
+    if not os.path.exists(meta):
+        print(f"Skipping folder {folder_id}")
+        return model
 
-    M = torch.zeros(len(batch), maxT, 80)
-    Y = torch.zeros(len(batch), maxT)
-    mask = torch.zeros(len(batch), maxT)
-    K = torch.zeros(len(batch), maxL, dtype=torch.long)
-    KL = torch.tensor([len(k) for k in kws])
+    ds = KWSDataset(meta, char2idx)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate)
 
-    for i in range(len(batch)):
-        M[i, :mels[i].shape[0]] = mels[i]
-        Y[i, :labels[i].shape[0]] = labels[i]
-        mask[i, :labels[i].shape[0]] = 1
-        K[i, :len(kws[i])] = kws[i]
+    model.train()
 
-    return M, K, KL, Y, mask
+    for epoch in range(epochs):
+        total, count = 0.0, 0
 
-def train_folder(folder_id):
-    print(f"\n🚀 Training folder {folder_id}")
-
-    ds = KWSDataset(
-        metadata_csv="data/metadata_fixed.csv",
-        folder_id=folder_id
-    )
-
-    loader = DataLoader(
-        ds,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        collate_fn=collate
-    )
-
-    model = KWSModel(len(ds.char2idx)).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=LR)
-    loss_fn = nn.BCEWithLogitsLoss(reduction="none")
-
-    for e in range(EPOCHS):
-        total = 0
-        for m, k, kl, y, mask in loader:
+        for m, k, kl, y, mask in tqdm(loader):
             m, k, kl, y, mask = (
                 m.to(DEVICE),
                 k.to(DEVICE),
                 kl.to(DEVICE),
                 y.to(DEVICE),
-                mask.to(DEVICE)
+                mask.to(DEVICE),
             )
 
             logits = model(m, k, kl)
-            loss = (loss_fn(logits, y) * mask).sum() / mask.sum()
 
-            opt.zero_grad()
+            loss_raw = F.binary_cross_entropy_with_logits(
+                logits, y, reduction="none"
+            )
+
+            valid = mask.sum().item()
+            if valid == 0:
+                continue
+
+            loss = (loss_raw * mask).sum() / valid
+
+            optimizer.zero_grad()
             loss.backward()
-            opt.step()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            optimizer.step()
 
             total += loss.item()
+            count += 1
 
-        print(f"Epoch {e+1} loss: {total/len(loader):.4f}")
+        print(f"Epoch {epoch+1} | Avg Loss: {total / max(count,1):.4f}")
 
-    os.makedirs(f"checkpoints/folder_{folder_id}", exist_ok=True)
-    torch.save(model.state_dict(), f"checkpoints/folder_{folder_id}/model.pt")
-    print(f"✅ Saved checkpoint: checkpoints/folder_{folder_id}/model.pt")
-
-if __name__ == "__main__":
-    # Train specific folders by changing the range
-    # Examples:
-    # - Single folder: train_folder(1)
-    # - Specific folders: for folder in [1, 3, 5]: train_folder(folder)
-    # - All folders: for folder in range(1, 13): train_folder(folder)
-    
-    import sys
-    
-    if len(sys.argv) > 1:
-        # Usage: python -m training.train 1 5 10 (trains folders 1, 5, and 10)
-        folder_ids = [int(x) for x in sys.argv[1:]]
-        for folder in folder_ids:
-            train_folder(folder)
-    else:
-        # Default: train all folders
-        for folder in range(1, 13):
-            train_folder(folder)
+    return model
