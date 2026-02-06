@@ -21,7 +21,7 @@ def train_one_folder(
 ):
     print(f"\n📁 Training folder {folder_id}")
 
-    meta_csv = f"{meta_root}/metadata_folder{folder_id}_fixed.csv"
+    meta_csv = f"{meta_root}/metadata_folder{folder_id}_aligned.csv"
     if not os.path.exists(meta_csv):
         print(f"⚠️ Metadata missing for folder {folder_id}, skipping")
         return model
