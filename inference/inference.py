@@ -136,7 +136,11 @@ class KWSInferencer:
             # --------------------------------------------------
 
             duration_frames = max(1, end - start)
-            margin = max(1, int(self.tolerance_ratio * duration_frames))
+
+            min_abs_frames = int(0.15 * self.sample_rate / self.hop_length)  # 150 ms
+            rel_frames = int(self.tolerance_ratio * duration_frames)
+
+            margin = max(rel_frames, min_abs_frames)
 
             start = max(0, start - margin)
             end = min(len(probs) - 1, end + margin)
