@@ -7,7 +7,16 @@ from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
-   
+    """
+    CNN-based Keyword Spotting Inference
+
+    Input:
+        - Audio file
+        - Keyword (string)
+
+    Output:
+        - List of (start_time, end_time, confidence)
+    """
 
     def __init__(
         self,
@@ -18,25 +27,27 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        threshold=0.3,
+        on_threshold=0.30,     # start detection
+        off_threshold=0.15,    # stop detection (hysteresis)
         smooth_window=5,
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
-        self.threshold = threshold
+        self.on_threshold = on_threshold
+        self.off_threshold = off_threshold
         self.smooth_window = smooth_window
         self.char2idx = char2idx
 
-        # Load CNN model
+        # ---- Load CNN model ----
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
-        # Mel Spectrogram
+        # ---- Mel spectrogram ----
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
@@ -55,7 +66,9 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+            wav = torchaudio.functional.resample(
+                wav, sr, self.sample_rate
+            )
 
         audio_duration = wav.shape[0] / self.sample_rate
 
@@ -85,27 +98,35 @@ class KWSInferencer:
 
         with torch.no_grad():
 
-            # Load audio
+            # ---- Load audio ----
             wav, audio_duration = self._load_audio(wav_path)
             mel = self.mel(wav).transpose(0, 1).unsqueeze(0)  # [1, T, 80]
 
-            # Encode keyword
+            # ---- Encode keyword ----
             kw = self._keyword_to_ids(keyword)
             kw_len = torch.tensor([kw.shape[1]]).to(self.device)
 
-            # CNN forward → frame scores
+            # ---- CNN forward (frame-wise) ----
             logits = self.model(mel, kw, kw_len)
             probs = torch.sigmoid(logits)[0].cpu().numpy()  # [T]
 
-            # Smooth probabilities
+            # ---- Smooth probabilities ----
             if self.smooth_window > 1:
                 kernel = np.ones(self.smooth_window) / self.smooth_window
                 probs = np.convolve(probs, kernel, mode="same")
 
-            # Thresholding
-            active = probs >= self.threshold
+            # ---- HYSTERESIS THRESHOLDING (KEY FIX) ----
+            active = np.zeros_like(probs, dtype=bool)
 
-            # Extract continuous segments
+            inside = False
+            for i, p in enumerate(probs):
+                if not inside and p >= self.on_threshold:
+                    inside = True
+                elif inside and p < self.off_threshold:
+                    inside = False
+                active[i] = inside
+
+            # ---- Extract continuous segments ----
             segments = []
             start = None
 
@@ -119,7 +140,7 @@ class KWSInferencer:
             if start is not None:
                 segments.append((start, len(active) - 1))
 
-            # Convert segments → timestamps
+            # ---- Convert segments → timestamps ----
             results = []
 
             for s, e in segments:
