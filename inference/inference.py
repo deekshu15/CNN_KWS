@@ -8,35 +8,29 @@ from CNN_KWS.models.kws_model import KWSModel
 
 class KWSInferencer:
     """
-    CNN-based Keyword Spotting Inference
-    Produces near (not exact) timestamps with stable behavior
+    Speaker-independent CNN-based Keyword Spotting Inference
+    Uses confidence-weighted localization with keyword-level statistics
     """
 
     def __init__(
         self,
         checkpoint_path,
         char2idx,
+        keyword_stats,          # dict: keyword -> median_duration_sec
         device="cpu",
         sample_rate=16000,
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.25,
-        expected_kw_duration=0.45,   # 🔑 tuned from data
-        max_deviation_pct=0.05       # duration stability
+        base_threshold=0.3
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
-
         self.base_threshold = base_threshold
-        self.expected_kw_duration = expected_kw_duration
-        self.max_dev = max_deviation_pct
 
-        self.expected_frames = int(expected_kw_duration * sample_rate / hop_length)
-        self.allowed_frames = int(self.expected_frames * max_deviation_pct)
-
+        self.keyword_stats = keyword_stats
         self.char2idx = char2idx
 
         self.model = KWSModel(len(char2idx)).to(device)
@@ -61,9 +55,7 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(
-                wav, sr, self.sample_rate
-            )
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
@@ -85,33 +77,25 @@ class KWSInferencer:
         # ---- Forward ----
         probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
 
-        peak_idx = int(np.argmax(probs))
-        peak_conf = float(probs[peak_idx])
-
-        if peak_conf < self.base_threshold:
+        max_p = probs.max()
+        if max_p < self.base_threshold:
             return None
 
-        # ---- LEFT-BIASED duration window ----
-        total = self.expected_frames
-        left_frames = int(total * 0.55)   # 🔑 bias left
-        right_frames = total - left_frames
+        # ---- Confidence-weighted center ----
+        idxs = np.arange(len(probs))
+        weights = probs * (probs > 0.3 * max_p)
 
-        start = peak_idx - left_frames
-        end = peak_idx + right_frames
+        if weights.sum() == 0:
+            return None
 
-        # ---- Clamp duration within ±5% ----
-        min_len = self.expected_frames - self.allowed_frames
-        max_len = self.expected_frames + self.allowed_frames
-        cur_len = end - start
+        center = int(np.sum(idxs * weights) / np.sum(weights))
 
-        if cur_len < min_len:
-            expand = (min_len - cur_len) // 2
-            start -= expand
-            end += expand
-        elif cur_len > max_len:
-            shrink = (cur_len - max_len) // 2
-            start += shrink
-            end -= shrink
+        # ---- Keyword-adaptive duration ----
+        dur_sec = self.keyword_stats.get(keyword, 0.45)
+        dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
+
+        start = center - dur_frames // 2
+        end = center + dur_frames // 2
 
         start = max(start, 0)
         end = min(end, len(probs) - 1)
@@ -122,5 +106,5 @@ class KWSInferencer:
         return (
             float(round(start_time, 3)),
             float(round(end_time, 3)),
-            float(round(peak_conf, 3))
+            float(round(max_p, 3))
         )
