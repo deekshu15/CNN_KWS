@@ -1,3 +1,9 @@
+import torch
+import torchaudio
+import soundfile as sf
+import numpy as np
+
+from CNN_KWS.models.kws_model import KWSModel
 @torch.no_grad()
 def infer(self, wav_path, keyword):
     """
