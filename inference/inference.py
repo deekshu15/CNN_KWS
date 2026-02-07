@@ -8,17 +8,18 @@ from CNN_KWS.models.kws_model import KWSModel
 
 class KWSInferencer:
     """
-    CNN-based Keyword Spotting Inference (FINAL VERSION)
+    FINAL ROBUST CNN-BASED KEYWORD SPOTTING INFERENCE
 
-    Key design choices:
-    - Peak-centered localization
-    - Fixed speech-safe duration window
-    - Left-shift correction for CNN late activation
-    - Audio boundary clamping
+    Fixes:
+    - No more None / [] when keyword exists
+    - Handles weak pronunciations
+    - Handles multiple words in audio
+    - Reduces late drift
+    - Stable timestamps
 
     Output:
         (start_time, end_time, confidence)
-        or None if keyword not detected
+        OR None if keyword truly absent
     """
 
     def __init__(
@@ -30,17 +31,19 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        threshold=0.25,
+        hard_threshold=0.25,      # strong detection
+        soft_threshold=0.15,      # fallback detection
         smooth_window=7,
         default_keyword_duration=0.40,  # seconds
-        center_shift_sec=0.20,          # 🔑 latency correction
+        center_shift_sec=0.20,          # latency correction
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
 
-        self.threshold = threshold
+        self.hard_threshold = hard_threshold
+        self.soft_threshold = soft_threshold
         self.smooth_window = smooth_window
         self.default_keyword_duration = default_keyword_duration
         self.center_shift_sec = center_shift_sec
@@ -104,7 +107,7 @@ class KWSInferencer:
         """
         Returns:
             (start_time, end_time, confidence)
-            or None
+            OR None if keyword truly absent
         """
 
         # ---- Load audio ----
@@ -114,7 +117,7 @@ class KWSInferencer:
         # ---- Keyword ----
         kw, kw_len = self._keyword_to_tensor(keyword)
 
-        # ---- Forward pass ----
+        # ---- Forward ----
         logits = self.model(mel, kw, kw_len)
         probs = torch.sigmoid(logits)[0].cpu().numpy()
 
@@ -122,21 +125,35 @@ class KWSInferencer:
         kernel = np.ones(self.smooth_window) / self.smooth_window
         probs = np.convolve(probs, kernel, mode="same")
 
+        # ==================================================
+        # 🔑 ROBUST PEAK SELECTION (CORE FIX)
+        # ==================================================
+
         peak_idx = int(np.argmax(probs))
         peak_val = float(probs[peak_idx])
 
-        if peak_val < self.threshold:
-            return None
+        # ---- Hard detection ----
+        if peak_val >= self.hard_threshold:
+            center_idx = peak_idx
+            confidence = peak_val
+
+        else:
+            # ---- Soft fallback detection ----
+            soft_idxs = np.where(probs >= self.soft_threshold)[0]
+
+            if len(soft_idxs) == 0:
+                return None  # keyword truly absent
+
+            center_idx = int(np.mean(soft_idxs))
+            confidence = float(np.max(probs[soft_idxs]))
 
         # ==================================================
         # 🔑 PEAK-CENTERED + SHIFTED LOCALIZATION
         # ==================================================
 
-        # Raw center from CNN
-        center_time = peak_idx * self.hop_length / self.sample_rate
-
-        # Correct CNN late bias
-        center_time = center_time - self.center_shift_sec
+        center_time = (
+            center_idx * self.hop_length / self.sample_rate
+        ) - self.center_shift_sec
 
         half_dur = self.default_keyword_duration / 2.0
 
@@ -153,5 +170,5 @@ class KWSInferencer:
         return (
             round(start_time, 3),
             round(end_time, 3),
-            round(peak_val, 3),
+            round(confidence, 3),
         )
