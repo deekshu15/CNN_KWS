@@ -7,17 +7,7 @@ from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
-    """
-    Keyword Spotting Inference
-
-    Input:
-        - Audio file (.wav)
-        - Keyword (string)
-
-    Output:
-        - (start_time, end_time, confidence)
-        - OR None if keyword not detected
-    """
+   
 
     def __init__(
         self,
@@ -28,23 +18,25 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
+        threshold=0.3,
         smooth_window=5,
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
+        self.threshold = threshold
         self.smooth_window = smooth_window
         self.char2idx = char2idx
 
-        # ---- Load trained model ----
+        # Load CNN model
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
-        # ---- Mel spectrogram ----
+        # Mel Spectrogram
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
@@ -52,7 +44,7 @@ class KWSInferencer:
         ).to(device)
 
     # --------------------------------------------------
-    # Utility functions
+    # Utilities
     # --------------------------------------------------
 
     def _load_audio(self, wav_path):
@@ -63,12 +55,9 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(
-                wav, sr, self.sample_rate
-            )
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
 
-        audio_len_samples = wav.shape[0]
-        audio_duration = audio_len_samples / self.sample_rate
+        audio_duration = wav.shape[0] / self.sample_rate
 
         wav = wav[: self.max_len]
         if wav.shape[0] < self.max_len:
@@ -81,77 +70,75 @@ class KWSInferencer:
     def _keyword_to_ids(self, keyword):
         ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
         if len(ids) == 0:
-            raise ValueError("Keyword contains no valid characters")
+            raise ValueError("Keyword has no valid characters")
         return torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(self.device)
 
     # --------------------------------------------------
-    # Inference (COMPETITION-GRADE & SAFE)
+    # CNN → FRAME SCORES → TIMESTAMPS
     # --------------------------------------------------
 
     def infer(self, wav_path, keyword):
         """
         Returns:
-            (start_time, end_time, confidence)
-            OR None
+            List of (start_time, end_time, confidence)
         """
+
         with torch.no_grad():
 
-            # ---- Load audio ----
+            # Load audio
             wav, audio_duration = self._load_audio(wav_path)
             mel = self.mel(wav).transpose(0, 1).unsqueeze(0)  # [1, T, 80]
 
-            # ---- Keyword encoding ----
+            # Encode keyword
             kw = self._keyword_to_ids(keyword)
             kw_len = torch.tensor([kw.shape[1]]).to(self.device)
 
-            # ---- Model forward ----
+            # CNN forward → frame scores
             logits = self.model(mel, kw, kw_len)
             probs = torch.sigmoid(logits)[0].cpu().numpy()  # [T]
 
-            # ---- Smooth probabilities ----
+            # Smooth probabilities
             if self.smooth_window > 1:
                 kernel = np.ones(self.smooth_window) / self.smooth_window
                 probs = np.convolve(probs, kernel, mode="same")
 
-            # ---- Candidate peak selection ----
-            threshold = 0.15
-            candidates = np.where(probs >= threshold)[0]
-            if len(candidates) == 0:
-                return None
+            # Thresholding
+            active = probs >= self.threshold
 
-            peak = int(candidates[np.argmax(probs[candidates])])
-            peak_val = float(probs[peak])
+            # Extract continuous segments
+            segments = []
+            start = None
 
-            # ---- Gradient-based boundary detection ----
-            grad = np.gradient(probs)
+            for i, val in enumerate(active):
+                if val and start is None:
+                    start = i
+                elif not val and start is not None:
+                    segments.append((start, i - 1))
+                    start = None
 
-            left = peak
-            while left > 1 and grad[left] > -0.002:
-                left -= 1
+            if start is not None:
+                segments.append((start, len(active) - 1))
 
-            right = peak
-            while right < len(probs) - 2 and grad[right] < 0.002:
-                right += 1
+            # Convert segments → timestamps
+            results = []
 
-            # ---- Energy-aware expansion ----
-            expand = int(0.15 * (right - left + 1))
-            left = max(0, left - expand)
-            right = min(len(probs) - 1, right + expand)
+            for s, e in segments:
+                start_time = s * self.hop_length / self.sample_rate
+                end_time = e * self.hop_length / self.sample_rate
 
-            # ---- Convert to time ----
-            start_time = left * self.hop_length / self.sample_rate
-            end_time = right * self.hop_length / self.sample_rate
+                # Clamp to audio duration
+                start_time = max(0.0, start_time)
+                end_time = min(audio_duration, end_time)
 
-            # ---- HARD CLAMP (CRITICAL) ----
-            start_time = max(0.0, start_time)
-            end_time = min(audio_duration, end_time)
+                if end_time <= start_time:
+                    continue
 
-            # ---- Sanity check ----
-            if end_time <= start_time:
-                return None
+                confidence = float(probs[s:e + 1].max())
 
-            return (
-                round(start_time, 3),
-                round(end_time, 3),
-                round(peak_val, 3),
-            )
+                results.append((
+                    round(start_time, 3),
+                    round(end_time, 3),
+                    round(confidence, 3)
+                ))
+
+            return results
