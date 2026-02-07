@@ -11,7 +11,7 @@ class KWSInferencer:
     CNN-based Keyword Spotting Inference
 
     Input:
-        - Audio file
+        - Audio file (.wav)
         - Keyword (string)
 
     Output:
@@ -27,17 +27,25 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        on_threshold=0.30,     # start detection
-        off_threshold=0.15,    # stop detection (hysteresis)
+        on_threshold=0.30,        # start detection
+        off_threshold=0.15,       # stop detection (hysteresis)
+        min_duration_sec=0.25,    # 🔑 tail-hold (minimum keyword duration)
         smooth_window=5,
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
+
         self.on_threshold = on_threshold
         self.off_threshold = off_threshold
         self.smooth_window = smooth_window
+
+        # Minimum duration in frames
+        self.min_duration_frames = int(
+            min_duration_sec * sample_rate / hop_length
+        )
+
         self.char2idx = char2idx
 
         # ---- Load CNN model ----
@@ -106,7 +114,7 @@ class KWSInferencer:
             kw = self._keyword_to_ids(keyword)
             kw_len = torch.tensor([kw.shape[1]]).to(self.device)
 
-            # ---- CNN forward (frame-wise) ----
+            # ---- CNN forward (frame-wise scores) ----
             logits = self.model(mel, kw, kw_len)
             probs = torch.sigmoid(logits)[0].cpu().numpy()  # [T]
 
@@ -115,7 +123,7 @@ class KWSInferencer:
                 kernel = np.ones(self.smooth_window) / self.smooth_window
                 probs = np.convolve(probs, kernel, mode="same")
 
-            # ---- HYSTERESIS THRESHOLDING (KEY FIX) ----
+            # ---- HYSTERESIS THRESHOLDING ----
             active = np.zeros_like(probs, dtype=bool)
 
             inside = False
@@ -126,16 +134,24 @@ class KWSInferencer:
                     inside = False
                 active[i] = inside
 
-            # ---- Extract continuous segments ----
+            # ---- SEGMENT EXTRACTION WITH TAIL-HOLD ----
             segments = []
             start = None
+            frames_since_start = 0
 
             for i, val in enumerate(active):
                 if val and start is None:
                     start = i
-                elif not val and start is not None:
-                    segments.append((start, i - 1))
-                    start = None
+                    frames_since_start = 0
+
+                elif start is not None:
+                    frames_since_start += 1
+
+                    # Allow ending only after minimum duration
+                    if not val and frames_since_start >= self.min_duration_frames:
+                        segments.append((start, i - 1))
+                        start = None
+                        frames_since_start = 0
 
             if start is not None:
                 segments.append((start, len(active) - 1))
