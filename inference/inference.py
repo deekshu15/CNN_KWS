@@ -7,11 +7,6 @@ from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
-    """
-    Keyword Spotting Inference
-    Input  : audio file + keyword (text)
-    Output : (start_time, end_time, confidence)
-    """
 
     def __init__(
         self,
@@ -31,20 +26,22 @@ class KWSInferencer:
         self.smooth_window = smooth_window
         self.char2idx = char2idx
 
-        # ---- Load model ----
+        # ---- Load trained model ----
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
-        # ---- Feature extractor ----
+        # ---- Mel spectrogram ----
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
             hop_length=hop_length,
         ).to(device)
 
+    # --------------------------------------------------
+    # Utility functions
     # --------------------------------------------------
 
     def _load_audio(self, wav_path):
@@ -70,45 +67,58 @@ class KWSInferencer:
     def _keyword_to_ids(self, keyword):
         ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
         if len(ids) == 0:
-            raise ValueError("Keyword has no valid characters")
+            raise ValueError("Keyword contains no valid characters")
         return torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(self.device)
 
     # --------------------------------------------------
+    # Inference (Competition-grade)
+    # --------------------------------------------------
 
-    @torch.no_grad()
     def infer(self, wav_path, keyword):
-        wav = self._load_audio(wav_path)
+        """
+        Returns:
+            (start_time, end_time, confidence)
+        """
+        with torch.no_grad():
 
-        mel = self.mel(wav).transpose(0, 1).unsqueeze(0)  # [1, T, 80]
+            # ---- Load & preprocess audio ----
+            wav = self._load_audio(wav_path)
+            mel = self.mel(wav).transpose(0, 1).unsqueeze(0)  # [1, T, 80]
 
-        kw = self._keyword_to_ids(keyword)
-        kw_len = torch.tensor([kw.shape[1]]).to(self.device)
+            # ---- Encode keyword ----
+            kw = self._keyword_to_ids(keyword)
+            kw_len = torch.tensor([kw.shape[1]]).to(self.device)
 
-        logits = self.model(mel, kw, kw_len)
-        probs = torch.sigmoid(logits)[0].cpu().numpy()  # [T]
+            # ---- Forward pass ----
+            logits = self.model(mel, kw, kw_len)
+            probs = torch.sigmoid(logits)[0].cpu().numpy()  # [T]
 
-        # ---- smoothing ----
-        if self.smooth_window > 1:
-            kernel = np.ones(self.smooth_window) / self.smooth_window
-            probs = np.convolve(probs, kernel, mode="same")
+            # ---- Smooth probabilities ----
+            if self.smooth_window > 1:
+                kernel = np.ones(self.smooth_window) / self.smooth_window
+                probs = np.convolve(probs, kernel, mode="same")
 
-        # ---- strongest activation ----
-        peak = int(np.argmax(probs))
-        peak_val = float(probs[peak])
+            # ---- Peak detection ----
+            peak = int(np.argmax(probs))
+            peak_val = float(probs[peak])
 
-        left = peak
-        while left > 0 and probs[left] > 0.5 * peak_val:
-            left -= 1
+            # ---- Gradient-based boundary detection ----
+            grad = np.gradient(probs)
 
-        right = peak
-        while right < len(probs) - 1 and probs[right] > 0.5 * peak_val:
-            right += 1
+            left = peak
+            while left > 1 and grad[left] > -0.002:
+                left -= 1
 
-        start_time = left * self.hop_length / self.sample_rate
-        end_time = right * self.hop_length / self.sample_rate
+            right = peak
+            while right < len(probs) - 2 and grad[right] < 0.002:
+                right += 1
 
-        return (
-            round(start_time, 3),
-            round(end_time, 3),
-            round(peak_val, 3),
-        )
+            # ---- Convert to time ----
+            start_time = left * self.hop_length / self.sample_rate
+            end_time = right * self.hop_length / self.sample_rate
+
+            return (
+                round(start_time, 3),
+                round(end_time, 3),
+                round(peak_val, 3),
+            )
