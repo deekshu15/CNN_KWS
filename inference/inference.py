@@ -9,7 +9,7 @@ from CNN_KWS.models.kws_model import KWSModel
 class KWSInferencer:
     """
     CNN-based Keyword Spotting Inference
-    Ensures timestamp deviation stays within ~5% of expected duration
+    Produces near (not exact) timestamps with stable behavior
     """
 
     def __init__(
@@ -22,8 +22,8 @@ class KWSInferencer:
         hop_length=160,
         max_seconds=10.0,
         base_threshold=0.25,
-        expected_kw_duration=0.5,   # 🔑 average keyword duration (seconds)
-        max_deviation_pct=0.05      # 🔑 5% constraint
+        expected_kw_duration=0.45,   # 🔑 tuned from data
+        max_deviation_pct=0.05       # duration stability
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -61,7 +61,9 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+            wav = torchaudio.functional.resample(
+                wav, sr, self.sample_rate
+            )
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
@@ -83,23 +85,25 @@ class KWSInferencer:
         # ---- Forward ----
         probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
 
-        peak_idx = np.argmax(probs)
-        peak_conf = probs[peak_idx]
+        peak_idx = int(np.argmax(probs))
+        peak_conf = float(probs[peak_idx])
 
         if peak_conf < self.base_threshold:
             return None
 
-        # ---- 5% deviation–controlled window ----
-        half_window = self.expected_frames // 2
+        # ---- LEFT-BIASED duration window ----
+        total = self.expected_frames
+        left_frames = int(total * 0.55)   # 🔑 bias left
+        right_frames = total - left_frames
 
-        start = peak_idx - half_window
-        end = peak_idx + half_window
+        start = peak_idx - left_frames
+        end = peak_idx + right_frames
 
-        # Clamp within allowed 5%
+        # ---- Clamp duration within ±5% ----
         min_len = self.expected_frames - self.allowed_frames
         max_len = self.expected_frames + self.allowed_frames
-
         cur_len = end - start
+
         if cur_len < min_len:
             expand = (min_len - cur_len) // 2
             start -= expand
@@ -115,4 +119,8 @@ class KWSInferencer:
         start_time = start * self.hop_length / self.sample_rate
         end_time = end * self.hop_length / self.sample_rate
 
-        return round(start_time, 3), round(end_time, 3), round(float(peak_conf), 3)
+        return (
+            float(round(start_time, 3)),
+            float(round(end_time, 3)),
+            float(round(peak_conf, 3))
+        )
