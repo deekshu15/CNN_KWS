@@ -8,17 +8,17 @@ from CNN_KWS.models.kws_model import KWSModel
 
 class KWSInferencer:
     """
-    CNN-based Keyword Spotting Inference (FINAL)
+    CNN-based Keyword Spotting Inference (FINAL VERSION)
 
-    Strategy:
-    - Detect peak activation (CNN)
-    - Use PEAK-CENTERED localization
-    - Apply FIXED speech-safe duration
-    - Clamp to audio boundaries
+    Key design choices:
+    - Peak-centered localization
+    - Fixed speech-safe duration window
+    - Left-shift correction for CNN late activation
+    - Audio boundary clamping
 
     Output:
-    - Near timestamps (not exact)
-    - Stable and evaluation-friendly
+        (start_time, end_time, confidence)
+        or None if keyword not detected
     """
 
     def __init__(
@@ -32,7 +32,8 @@ class KWSInferencer:
         max_seconds=10.0,
         threshold=0.25,
         smooth_window=7,
-        default_keyword_duration=0.40,  # 🔑 seconds (speech-safe)
+        default_keyword_duration=0.40,  # seconds
+        center_shift_sec=0.20,          # 🔑 latency correction
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -42,6 +43,7 @@ class KWSInferencer:
         self.threshold = threshold
         self.smooth_window = smooth_window
         self.default_keyword_duration = default_keyword_duration
+        self.center_shift_sec = center_shift_sec
         self.char2idx = char2idx
 
         # ---------------- Load model ----------------
@@ -51,7 +53,7 @@ class KWSInferencer:
         )
         self.model.eval()
 
-        # ---------------- Feature extractor ----------------
+        # ---------------- Mel Spectrogram ----------------
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
@@ -102,7 +104,7 @@ class KWSInferencer:
         """
         Returns:
             (start_time, end_time, confidence)
-            OR None if keyword not detected
+            or None
         """
 
         # ---- Load audio ----
@@ -112,7 +114,7 @@ class KWSInferencer:
         # ---- Keyword ----
         kw, kw_len = self._keyword_to_tensor(keyword)
 
-        # ---- Forward ----
+        # ---- Forward pass ----
         logits = self.model(mel, kw, kw_len)
         probs = torch.sigmoid(logits)[0].cpu().numpy()
 
@@ -127,17 +129,21 @@ class KWSInferencer:
             return None
 
         # ==================================================
-        # 🔑 PEAK-CENTERED TIMESTAMPING (CORE FIX)
+        # 🔑 PEAK-CENTERED + SHIFTED LOCALIZATION
         # ==================================================
 
+        # Raw center from CNN
         center_time = peak_idx * self.hop_length / self.sample_rate
 
-        half_duration = self.default_keyword_duration / 2.0
+        # Correct CNN late bias
+        center_time = center_time - self.center_shift_sec
 
-        start_time = center_time - half_duration
-        end_time = center_time + half_duration
+        half_dur = self.default_keyword_duration / 2.0
 
-        # ---- Clamp to audio ----
+        start_time = center_time - half_dur
+        end_time = center_time + half_dur
+
+        # ---- Clamp to audio boundaries ----
         start_time = max(0.0, start_time)
         end_time = min(audio_duration, end_time)
 
