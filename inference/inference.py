@@ -10,16 +10,19 @@ class KWSInferencer:
     """
     FINAL ROBUST CNN-BASED KEYWORD SPOTTING INFERENCE
 
-    Fixes:
-    - No more None / [] when keyword exists
-    - Handles weak pronunciations
-    - Handles multiple words in audio
-    - Reduces late drift
-    - Stable timestamps
+    Input :
+        - wav file
+        - keyword (text)
 
     Output:
-        (start_time, end_time, confidence)
-        OR None if keyword truly absent
+        - (start_time, end_time, confidence)
+        - None if keyword truly absent
+
+    Design:
+        - Peak-centered localization
+        - CNN latency correction
+        - Soft fallback for weak activations
+        - Confidence-aware duration scaling
     """
 
     def __init__(
@@ -31,11 +34,11 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        hard_threshold=0.25,      # strong detection
-        soft_threshold=0.15,      # fallback detection
+        hard_threshold=0.25,
+        soft_threshold=0.15,
         smooth_window=7,
         default_keyword_duration=0.40,  # seconds
-        center_shift_sec=0.20,          # latency correction
+        center_shift_sec=0.20,          # CNN latency correction
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -107,7 +110,7 @@ class KWSInferencer:
         """
         Returns:
             (start_time, end_time, confidence)
-            OR None if keyword truly absent
+            or None
         """
 
         # ---- Load audio ----
@@ -126,36 +129,36 @@ class KWSInferencer:
         probs = np.convolve(probs, kernel, mode="same")
 
         # ==================================================
-        # 🔑 ROBUST PEAK SELECTION (CORE FIX)
+        # Robust peak selection
         # ==================================================
 
         peak_idx = int(np.argmax(probs))
         peak_val = float(probs[peak_idx])
 
-        # ---- Hard detection ----
         if peak_val >= self.hard_threshold:
             center_idx = peak_idx
             confidence = peak_val
-
         else:
-            # ---- Soft fallback detection ----
             soft_idxs = np.where(probs >= self.soft_threshold)[0]
-
             if len(soft_idxs) == 0:
-                return None  # keyword truly absent
-
+                return None
             center_idx = int(np.mean(soft_idxs))
             confidence = float(np.max(probs[soft_idxs]))
 
         # ==================================================
-        # 🔑 PEAK-CENTERED + SHIFTED LOCALIZATION
+        # Peak-centered localization + latency correction
         # ==================================================
 
         center_time = (
             center_idx * self.hop_length / self.sample_rate
         ) - self.center_shift_sec
 
-        half_dur = self.default_keyword_duration / 2.0
+        # ==================================================
+        # 🔑 CONFIDENCE-AWARE DURATION SCALING (FINAL FIX)
+        # ==================================================
+
+        scale = max(1.0, 0.35 / confidence)
+        half_dur = (self.default_keyword_duration * scale) / 2.0
 
         start_time = center_time - half_dur
         end_time = center_time + half_dur
