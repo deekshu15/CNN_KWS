@@ -10,9 +10,9 @@ class KWSInferencer:
     """
     FINAL CNN-based Keyword Spotting Inference
 
-    - Accurate for single-keyword audio
-    - Stable for multi-keyword audio
-    - Rejects absent keywords
+    - Accurate timestamps when keyword is present
+    - Consistent rejection when keyword is absent
+    - Stable for multi-word utterances
     - No ASR / No forced alignment
     """
 
@@ -26,8 +26,8 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        confidence_threshold=0.18,     # 🔑 relaxed
-        min_frames_ratio=0.25          # 🔑 relaxed
+        confidence_threshold=0.18,   # absolute confidence gate
+        min_frames_ratio=0.25        # duration validation
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -86,9 +86,15 @@ class KWSInferencer:
         probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
 
         max_p = probs.max()
+        mean_p = probs.mean()
 
-        # 🔑 confidence gate
+        # 1️⃣ Absolute confidence gate
         if max_p < self.confidence_threshold:
+            return None
+
+        # 2️⃣ Relative confidence gate (CRITICAL FIX)
+        # Keyword must stand out from background
+        if max_p < mean_p * 2.2:
             return None
 
         # ---------- Duration-based validation ----------
