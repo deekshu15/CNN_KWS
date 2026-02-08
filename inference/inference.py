@@ -7,53 +7,47 @@ from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
+    """
+    CNN-based Keyword Spotting with temporal exclusion
+    Works for both single-word and multi-word audios
+    """
 
     def __init__(
         self,
         checkpoint_path,
         char2idx,
+        keyword_stats,
         device="cpu",
         sample_rate=16000,
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.15,   # soft confidence gate
-        peak_ratio=0.4         # relative peak threshold
+        base_threshold=0.3
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
-
         self.base_threshold = base_threshold
-        self.peak_ratio = peak_ratio
 
         self.char2idx = char2idx
+        self.keyword_stats = keyword_stats
 
-        # ---- Load model ----
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
-        # ---- Mel extractor ----
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
             hop_length=hop_length,
         ).to(device)
 
-    # --------------------------------------------------
-
     @torch.no_grad()
-    def infer(self, wav_path, keyword):
-        """
-        Returns:
-            (start_time_sec, end_time_sec, confidence) or None
-        """
-
-        # ---------- Load audio ----------
+    def infer(self, wav_path, keyword, used_mask=None):
+        # ---- Load audio ----
         wav, sr = sf.read(wav_path)
         wav = torch.tensor(wav, dtype=torch.float32)
 
@@ -71,74 +65,69 @@ class KWSInferencer:
                 wav, (0, self.max_len - wav.shape[0])
             )
 
-        # ---------- Mel ----------
-        mel = self.mel(wav.to(self.device))          # [80, T]
-        mel = mel.transpose(0, 1).unsqueeze(0)       # [1, T, 80]
+        mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
 
-        # ---------- Keyword encoding ----------
-        kw_ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
-        if len(kw_ids) == 0:
-            return None
-
+        # ---- Keyword encoding ----
         kw = torch.tensor(
-            kw_ids, dtype=torch.long, device=self.device
+            [self.char2idx[c] for c in keyword if c in self.char2idx],
+            dtype=torch.long,
+            device=self.device
         ).unsqueeze(0)
-        kl = torch.tensor([len(kw_ids)], device=self.device)
 
-        # ---------- Forward ----------
-        logits = self.model(mel, kw, kl)             # [1, T]
-        probs = torch.sigmoid(logits)[0].cpu().numpy()
+        kl = torch.tensor([kw.shape[1]], device=self.device)
 
-        max_p = float(probs.max())
+        # ---- Forward ----
+        probs = torch.sigmoid(
+            self.model(mel, kw, kl)
+        )[0].cpu().numpy()
+
+        if used_mask is not None:
+            probs = probs * (1.0 - used_mask)
+
+        max_p = probs.max()
         if max_p < self.base_threshold:
             return None
 
-        # ---------- Find candidate regions ----------
-        thr = self.peak_ratio * max_p
-        mask = probs >= thr
+        # ---- Peak selection ----
+        peak = int(np.argmax(probs))
 
-        regions = []
-        start = None
+        # ---- Duration estimation ----
+        dur_sec = self.keyword_stats.get(keyword, 0.45)
+        dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
 
-        for i, v in enumerate(mask):
-            if v and start is None:
-                start = i
-            elif not v and start is not None:
-                end = i - 1
-                conf = float(probs[start:end + 1].max())
-                regions.append((start, end, conf))
-                start = None
+        start = max(0, peak - dur_frames // 2)
+        end = min(len(probs) - 1, peak + dur_frames // 2)
 
-        if start is not None:
-            end = len(mask) - 1
-            conf = float(probs[start:end + 1].max())
-            regions.append((start, end, conf))
+        start_time = start * self.hop_length / self.sample_rate
+        end_time = end * self.hop_length / self.sample_rate
 
-        if len(regions) == 0:
-            return None
+        return {
+            "start": round(float(start_time), 3),
+            "end": round(float(end_time), 3),
+            "confidence": round(float(max_p), 3),
+            "start_frame": start,
+            "end_frame": end
+        }
 
-        # ==========================================================
-        # 🔑 CRITICAL FIX FOR MULTI-WORD AUDIO
-        # Select the EARLIEST plausible region (not the strongest)
-        # ==========================================================
-        regions.sort(key=lambda r: r[0])  # sort by start frame
+    def infer_sequence(self, wav_path, keywords):
+        """
+        Correct inference for multi-word audio
+        """
+        used_mask = None
+        results = {}
 
-        chosen = None
-        for s, e, conf in regions:
-            if conf >= self.base_threshold:
-                chosen = (s, e, conf)
-                break
+        for kw in keywords:
+            out = self.infer(wav_path, kw, used_mask)
+            if out is None:
+                results[kw] = None
+                continue
 
-        if chosen is None:
-            return None
+            if used_mask is None:
+                used_mask = np.zeros(
+                    int(self.max_len / self.hop_length)
+                )
 
-        # ---------- Convert frames → time ----------
-        s, e, conf = chosen
-        start_time = s * self.hop_length / self.sample_rate
-        end_time = e * self.hop_length / self.sample_rate
+            used_mask[out["start_frame"]:out["end_frame"] + 1] = 1.0
+            results[kw] = (out["start"], out["end"], out["confidence"])
 
-        return (
-            round(float(start_time), 3),
-            round(float(end_time), 3),
-            round(float(conf), 3)
-        )
+        return results
