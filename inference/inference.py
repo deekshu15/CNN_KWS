@@ -86,7 +86,7 @@ class KWSInferencer:
         weights = probs * (probs > 0.3 * max_p)
 
         if weights.sum() == 0:
-            return None
+            weights = probs
 
         center = int(np.sum(idxs * weights) / np.sum(weights))
 
