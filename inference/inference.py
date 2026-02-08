@@ -8,22 +8,22 @@ from CNN_KWS.models.kws_model import KWSModel
 
 class KWSInferencer:
     """
-    CNN-based Keyword Spotting
-    - Single keyword: unchanged logic
-    - Multi keyword : monotonic temporal decoding (professional fix)
+    CNN-based Keyword Spotting Inference
+    Input  : audio file + keyword
+    Output : timestamps within audio range
     """
 
     def __init__(
         self,
         checkpoint_path,
         char2idx,
-        keyword_stats,
+        keyword_stats,              # dict: keyword -> median duration (sec)
         device="cpu",
         sample_rate=16000,
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.15
+        base_threshold=0.25
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -34,6 +34,7 @@ class KWSInferencer:
         self.char2idx = char2idx
         self.keyword_stats = keyword_stats
 
+        # ---- Model ----
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
@@ -43,17 +44,17 @@ class KWSInferencer:
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
-            hop_length=hop_length,
+            hop_length=hop_length
         ).to(device)
 
-    # ------------------------------------------------------------
-    # 🔹 SINGLE KEYWORD INFERENCE (UNCHANGED)
-    # ------------------------------------------------------------
+    # =====================================================
     @torch.no_grad()
-    def infer(self, wav_path, keyword, start_frame=0):
+    def infer(self, wav_path, keyword, cursor_frame=0):
         """
-        Infer a single keyword starting from start_frame
+        Single keyword inference with cursor (for multi-word audio)
         """
+
+        # ---------- Load audio ----------
         wav, sr = sf.read(wav_path)
         wav = torch.tensor(wav, dtype=torch.float32)
 
@@ -72,90 +73,84 @@ class KWSInferencer:
             )
 
         mel = self.mel(wav.to(self.device)).transpose(0, 1)
+        mel = mel.unsqueeze(0)  # [1, T, 80]
 
-        # Restrict search region (THIS is the multi-word fix)
-        mel = mel[start_frame:].unsqueeze(0)
-
-        kw = torch.tensor(
-            [self.char2idx[c] for c in keyword if c in self.char2idx],
-            dtype=torch.long,
-            device=self.device
-        ).unsqueeze(0)
-
-        if kw.shape[1] == 0:
+        # ---------- Encode keyword ----------
+        kw_ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
+        if len(kw_ids) == 0:
             return None
 
+        kw = torch.tensor(kw_ids, dtype=torch.long, device=self.device).unsqueeze(0)
         kl = torch.tensor([kw.shape[1]], device=self.device)
 
-        probs = torch.sigmoid(
-            self.model(mel, kw, kl)
-        )[0].cpu().numpy()
+        # ---------- Forward ----------
+        probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
+        T = len(probs)
+
+        # ---------- Cursor masking (CRITICAL FIX) ----------
+        probs[:cursor_frame] = 0.0
 
         max_p = probs.max()
         if max_p < self.base_threshold:
             return None
 
-        # Dynamic threshold
-        thr = max(self.base_threshold, 0.4 * max_p)
-        active = probs >= thr
+        # ---------- Confidence-weighted center ----------
+        idxs = np.arange(T)
+        weights = probs * (probs > 0.4 * max_p)
 
-        if not active.any():
+        if weights.sum() == 0:
+            weights = probs
+
+        center = int(np.sum(idxs * weights) / np.sum(weights))
+
+        # ---------- Duration (keyword-adaptive) ----------
+        dur_sec = self.keyword_stats.get(keyword, 0.45)
+        dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
+
+        start_frame = center - dur_frames // 2
+        end_frame   = center + dur_frames // 2
+
+        # ---------- HARD CLIP TO AUDIO RANGE ----------
+        start_frame = max(0, start_frame)
+        end_frame   = min(end_frame, T - 1)
+
+        if end_frame <= start_frame:
             return None
 
-        # Extract longest active region
-        regions = []
-        s = None
-        for i, v in enumerate(active):
-            if v and s is None:
-                s = i
-            elif not v and s is not None:
-                regions.append((s, i))
-                s = None
-        if s is not None:
-            regions.append((s, len(active)))
-
-        start_f, end_f = max(regions, key=lambda x: x[1] - x[0])
-
-        # Convert back to global frame index
-        start_f += start_frame
-        end_f += start_frame
-
-        start_time = start_f * self.hop_length / self.sample_rate
-        end_time = end_f * self.hop_length / self.sample_rate
+        start_time = start_frame * self.hop_length / self.sample_rate
+        end_time   = end_frame   * self.hop_length / self.sample_rate
 
         return {
-            "start": round(start_time, 3),
-            "end": round(end_time, 3),
+            "start": round(float(start_time), 3),
+            "end": round(float(end_time), 3),
             "confidence": round(float(max_p), 3),
-            "start_frame": start_f,
-            "end_frame": end_f,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "num_frames": T
         }
 
-    # ------------------------------------------------------------
-    # 🔹 MULTI KEYWORD INFERENCE (FINAL FIX)
-    # ------------------------------------------------------------
+    # =====================================================
+    @torch.no_grad()
     def infer_sequence(self, wav_path, keywords):
         """
-        Monotonic multi-keyword inference
-        Enforces temporal order WITHOUT changing single-word logic
+        Multi-keyword inference for the SAME audio
+        Keywords are assumed in spoken order
         """
+
         results = {}
-        cursor = 0  # frame index
+        cursor = 0
 
         for kw in keywords:
-            out = self.infer(wav_path, kw, start_frame=cursor)
+            out = self.infer(wav_path, kw, cursor_frame=cursor)
 
             if out is None:
                 results[kw] = None
                 continue
 
-            results[kw] = (
-                out["start"],
-                out["end"],
-                out["confidence"]
-            )
+            results[kw] = out
 
-            # Move cursor forward (KEY FIX)
-            cursor = out["end_frame"]
+            # --------- Cursor advance (KEY FIX) ---------
+            duration = out["end_frame"] - out["start_frame"]
+            cursor = out["start_frame"] + int(0.6 * duration)
 
         return results
