@@ -9,7 +9,12 @@ from CNN_KWS.models.kws_model import KWSModel
 class KWSInferencer:
     """
     Speaker-independent CNN-based Keyword Spotting Inference
-    Uses confidence-weighted localization with keyword-level statistics
+
+    Input  : audio file + keyword (text)
+    Output : (start_time, end_time, confidence)
+
+    Uses confidence-weighted temporal localization with
+    keyword-level duration statistics.
     """
 
     def __init__(
@@ -22,23 +27,23 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.3
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
-        self.base_threshold = base_threshold
 
-        self.keyword_stats = keyword_stats
         self.char2idx = char2idx
+        self.keyword_stats = keyword_stats
 
+        # ---- Load model ----
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
+        # ---- Mel transform ----
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
@@ -47,6 +52,11 @@ class KWSInferencer:
 
     @torch.no_grad()
     def infer(self, wav_path, keyword):
+        """
+        Returns:
+            (start_time_sec, end_time_sec, confidence)
+        """
+
         # ---- Load audio ----
         wav, sr = sf.read(wav_path)
         wav = torch.tensor(wav, dtype=torch.float32)
@@ -55,7 +65,9 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+            wav = torchaudio.functional.resample(
+                wav, sr, self.sample_rate
+            )
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
@@ -63,42 +75,40 @@ class KWSInferencer:
                 wav, (0, self.max_len - wav.shape[0])
             )
 
-        mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
+        mel = self.mel(wav.to(self.device))
+        mel = mel.transpose(0, 1).unsqueeze(0)   # [1, T, 80]
 
-        # ---- Keyword encoding ----
-        kw = torch.tensor(
-            [self.char2idx[c] for c in keyword if c in self.char2idx],
-            dtype=torch.long,
-            device=self.device
-        ).unsqueeze(0)
+        # ---- Encode keyword ----
+        kw_ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
 
+        if len(kw_ids) == 0:
+            # Keyword cannot be encoded → return full clip with low confidence
+            return (0.0, 0.0, 0.0)
+
+        kw = torch.tensor(kw_ids, dtype=torch.long, device=self.device).unsqueeze(0)
         kl = torch.tensor([kw.shape[1]], device=self.device)
 
         # ---- Forward ----
-        probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
+        logits = self.model(mel, kw, kl)
+        probs = torch.sigmoid(logits)[0].cpu().numpy()
 
-        max_p = probs.max()
-        if max_p < self.base_threshold:
-            return None
+        max_p = float(probs.max())
 
-        # ---- Confidence-weighted center ----
+        # ---- Confidence-weighted temporal center ----
         idxs = np.arange(len(probs))
-        weights = probs * (probs > 0.3 * max_p)
+        weights = probs
 
-        if weights.sum() == 0:
-            weights = probs
-
-        center = int(np.sum(idxs * weights) / np.sum(weights))
+        if weights.sum() > 0:
+            center = int(np.sum(idxs * weights) / np.sum(weights))
+        else:
+            center = int(np.argmax(probs))
 
         # ---- Keyword-adaptive duration ----
         dur_sec = self.keyword_stats.get(keyword, 0.45)
         dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
 
-        start = center - dur_frames // 2
-        end = center + dur_frames // 2
-
-        start = max(start, 0)
-        end = min(end, len(probs) - 1)
+        start = max(center - dur_frames // 2, 0)
+        end = min(center + dur_frames // 2, len(probs) - 1)
 
         start_time = start * self.hop_length / self.sample_rate
         end_time = end * self.hop_length / self.sample_rate
