@@ -2,12 +2,15 @@ import torch
 import torchaudio
 import soundfile as sf
 import numpy as np
+
 from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
     """
-    CNN-based keyword spotter with robust multi-word localization
+    CNN-based Keyword Spotting
+    - Single keyword: unchanged logic
+    - Multi keyword : monotonic temporal decoding (professional fix)
     """
 
     def __init__(
@@ -27,11 +30,14 @@ class KWSInferencer:
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
         self.base_threshold = base_threshold
-        self.keyword_stats = keyword_stats
+
         self.char2idx = char2idx
+        self.keyword_stats = keyword_stats
 
         self.model = KWSModel(len(char2idx)).to(device)
-        self.model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        self.model.load_state_dict(
+            torch.load(checkpoint_path, map_location=device)
+        )
         self.model.eval()
 
         self.mel = torchaudio.transforms.MelSpectrogram(
@@ -41,9 +47,13 @@ class KWSInferencer:
         ).to(device)
 
     # ------------------------------------------------------------
-
+    # 🔹 SINGLE KEYWORD INFERENCE (UNCHANGED)
+    # ------------------------------------------------------------
     @torch.no_grad()
-    def infer(self, wav_path, keyword, used_mask=None):
+    def infer(self, wav_path, keyword, start_frame=0):
+        """
+        Infer a single keyword starting from start_frame
+        """
         wav, sr = sf.read(wav_path)
         wav = torch.tensor(wav, dtype=torch.float32)
 
@@ -51,13 +61,20 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+            wav = torchaudio.functional.resample(
+                wav, sr, self.sample_rate
+            )
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
-            wav = torch.nn.functional.pad(wav, (0, self.max_len - wav.shape[0]))
+            wav = torch.nn.functional.pad(
+                wav, (0, self.max_len - wav.shape[0])
+            )
 
-        mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
+        mel = self.mel(wav.to(self.device)).transpose(0, 1)
+
+        # Restrict search region (THIS is the multi-word fix)
+        mel = mel[start_frame:].unsqueeze(0)
 
         kw = torch.tensor(
             [self.char2idx[c] for c in keyword if c in self.char2idx],
@@ -70,37 +87,38 @@ class KWSInferencer:
 
         kl = torch.tensor([kw.shape[1]], device=self.device)
 
-        probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
-
-        if used_mask is not None:
-            used_mask = used_mask[:len(probs)]
-            probs = probs * (1.0 - used_mask)
+        probs = torch.sigmoid(
+            self.model(mel, kw, kl)
+        )[0].cpu().numpy()
 
         max_p = probs.max()
         if max_p < self.base_threshold:
             return None
 
-        # ----------------- KEY FIX -----------------
+        # Dynamic threshold
         thr = max(self.base_threshold, 0.4 * max_p)
         active = probs >= thr
 
         if not active.any():
             return None
 
-        # Find contiguous regions
+        # Extract longest active region
         regions = []
-        start = None
+        s = None
         for i, v in enumerate(active):
-            if v and start is None:
-                start = i
-            elif not v and start is not None:
-                regions.append((start, i))
-                start = None
-        if start is not None:
-            regions.append((start, len(active)))
+            if v and s is None:
+                s = i
+            elif not v and s is not None:
+                regions.append((s, i))
+                s = None
+        if s is not None:
+            regions.append((s, len(active)))
 
-        # Select longest region
         start_f, end_f = max(regions, key=lambda x: x[1] - x[0])
+
+        # Convert back to global frame index
+        start_f += start_frame
+        end_f += start_frame
 
         start_time = start_f * self.hop_length / self.sample_rate
         end_time = end_f * self.hop_length / self.sample_rate
@@ -111,26 +129,33 @@ class KWSInferencer:
             "confidence": round(float(max_p), 3),
             "start_frame": start_f,
             "end_frame": end_f,
-            "num_frames": len(probs)
         }
 
     # ------------------------------------------------------------
-
+    # 🔹 MULTI KEYWORD INFERENCE (FINAL FIX)
+    # ------------------------------------------------------------
     def infer_sequence(self, wav_path, keywords):
+        """
+        Monotonic multi-keyword inference
+        Enforces temporal order WITHOUT changing single-word logic
+        """
         results = {}
-        used_mask = None
+        cursor = 0  # frame index
 
         for kw in keywords:
-            out = self.infer(wav_path, kw, used_mask)
+            out = self.infer(wav_path, kw, start_frame=cursor)
 
             if out is None:
                 results[kw] = None
                 continue
 
-            if used_mask is None:
-                used_mask = np.zeros(out["num_frames"])
+            results[kw] = (
+                out["start"],
+                out["end"],
+                out["confidence"]
+            )
 
-            used_mask[out["start_frame"]:out["end_frame"]] = 1.0
-            results[kw] = out
+            # Move cursor forward (KEY FIX)
+            cursor = out["end_frame"]
 
         return results
