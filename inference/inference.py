@@ -9,9 +9,7 @@ from CNN_KWS.models.kws_model import KWSModel
 class KWSInferencer:
     """
     CNN-based Keyword Spotting Inference
-    Speaker-independent
-    Multi-word safe
-    Timestamp-robust
+    Robust timestamp localization (competition-ready)
     """
 
     def __init__(
@@ -24,13 +22,18 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.25
+        base_threshold=0.22,
+        smooth_window=7,          # 🔑 temporal smoothing
+        min_duration_ratio=0.6    # 🔑 minimum % of expected duration
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
+
         self.base_threshold = base_threshold
+        self.smooth_window = smooth_window
+        self.min_duration_ratio = min_duration_ratio
 
         self.keyword_stats = keyword_stats
         self.char2idx = char2idx
@@ -80,43 +83,47 @@ class KWSInferencer:
         # ---------- Forward ----------
         probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
 
+        # ---------- Temporal smoothing ----------
+        if self.smooth_window > 1:
+            kernel = np.ones(self.smooth_window) / self.smooth_window
+            probs = np.convolve(probs, kernel, mode="same")
+
         # ---------- Threshold ----------
         active = probs > self.base_threshold
         if not active.any():
             return None
 
-        # ---------- Find contiguous regions ----------
+        # ---------- Find contiguous segments ----------
         segments = []
         start = None
-
         for i, v in enumerate(active):
             if v and start is None:
                 start = i
             elif not v and start is not None:
                 segments.append((start, i))
                 start = None
-
         if start is not None:
             segments.append((start, len(active) - 1))
 
-        # ---------- Score segments ----------
-        dur_sec = self.keyword_stats.get(keyword, 0.45)
-        dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
+        # ---------- Duration-aware selection ----------
+        expected_sec = self.keyword_stats.get(keyword, 0.45)
+        expected_frames = int(expected_sec * self.sample_rate / self.hop_length)
+        min_frames = int(expected_frames * self.min_duration_ratio)
 
         best = None
         best_score = -1
 
         for s, e in segments:
             length = e - s
-            if length <= 0:
-                continue
+            if length < min_frames:
+                continue  # 🔑 remove spikes
 
-            center_score = probs[s:e].mean()
-            dur_penalty = abs(length - dur_frames) / max(dur_frames, 1)
+            conf = probs[s:e].mean()
 
-            score = center_score - 0.5 * dur_penalty
+            # Early bias (matches annotation)
+            time_penalty = 0.15 * (s / len(probs))
 
-            # Prefer earliest valid segment
+            score = conf - time_penalty
             if score > best_score:
                 best_score = score
                 best = (s, e)
@@ -128,11 +135,10 @@ class KWSInferencer:
 
         start_time = s * self.hop_length / self.sample_rate
         end_time = e * self.hop_length / self.sample_rate
-
         confidence = float(probs[s:e].max())
 
         return (
-            round(float(start_time), 3),
-            round(float(end_time), 3),
+            round(start_time, 3),
+            round(end_time, 3),
             round(confidence, 3)
         )
