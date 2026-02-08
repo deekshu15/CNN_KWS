@@ -2,30 +2,29 @@ import torch
 import torchaudio
 import soundfile as sf
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
     """
-    Speaker-independent CNN-based Keyword Spotting Inference
-
-    Input  : audio (.wav) + keyword (string)
-    Output : (start_time_sec, end_time_sec, confidence) OR None
+    CNN-based Keyword Spotting with segment-aware localization
     """
 
     def __init__(
         self,
         checkpoint_path,
         char2idx,
-        keyword_stats,              # dict: keyword -> median duration (sec)
+        keyword_stats,
         device="cpu",
         sample_rate=16000,
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.18,        # low threshold (CNN outputs are soft)
-        dominance_ratio=2.5         # 🔑 keyword presence rule
+        base_threshold=0.18,
+        smooth_sigma=2.0,
+        min_region_frames=5
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -33,34 +32,28 @@ class KWSInferencer:
         self.max_len = int(sample_rate * max_seconds)
 
         self.base_threshold = base_threshold
-        self.dominance_ratio = dominance_ratio
+        self.smooth_sigma = smooth_sigma
+        self.min_region_frames = min_region_frames
 
         self.char2idx = char2idx
         self.keyword_stats = keyword_stats
 
-        # ---- Load trained CNN model ----
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
-        # ---- Mel frontend ----
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
             hop_length=hop_length,
         ).to(device)
 
-    # ----------------------------------------------------------
+    # ---------------------------------------------------------
     @torch.no_grad()
     def infer(self, wav_path, keyword):
-        """
-        Returns:
-            (start_time_sec, end_time_sec, confidence) OR None
-        """
-
-        # ---------- Load audio ----------
+        # ---------- Audio ----------
         wav, sr = sf.read(wav_path)
         wav = torch.tensor(wav, dtype=torch.float32)
 
@@ -68,9 +61,7 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(
-                wav, sr, self.sample_rate
-            )
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
@@ -78,64 +69,73 @@ class KWSInferencer:
                 wav, (0, self.max_len - wav.shape[0])
             )
 
-        # ---------- Mel spectrogram ----------
-        mel = self.mel(wav.to(self.device))
-        mel = mel.transpose(0, 1).unsqueeze(0)   # [1, T, 80]
+        mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
 
-        # ---------- Keyword encoding ----------
+        # ---------- Keyword ----------
         kw_ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
         if len(kw_ids) == 0:
             return None
 
-        kw = torch.tensor(
-            kw_ids, dtype=torch.long, device=self.device
-        ).unsqueeze(0)
-
+        kw = torch.tensor(kw_ids, dtype=torch.long, device=self.device).unsqueeze(0)
         kl = torch.tensor([kw.shape[1]], device=self.device)
 
         # ---------- Forward ----------
-        probs = torch.sigmoid(
-            self.model(mel, kw, kl)
-        )[0].cpu().numpy()   # [T]
+        probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
 
-        # ---------- Presence validation ----------
+        # ---------- Smooth ----------
+        probs = gaussian_filter1d(probs, sigma=self.smooth_sigma)
+
         peak = probs.max()
-        mean = probs.mean()
-
-        # Rule 1: minimum confidence
         if peak < self.base_threshold:
             return None
 
-        # Rule 2: dominance over background (CRITICAL FIX)
-        if peak / (mean + 1e-6) < self.dominance_ratio:
+        # ---------- Binary mask ----------
+        mask = probs > (0.4 * peak)
+
+        # ---------- Find regions ----------
+        regions = []
+        start = None
+
+        for i, v in enumerate(mask):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                if i - start >= self.min_region_frames:
+                    regions.append((start, i))
+                start = None
+
+        if start is not None and len(mask) - start >= self.min_region_frames:
+            regions.append((start, len(mask)))
+
+        if not regions:
             return None
 
-        # ---------- Robust center estimation ----------
-        threshold = 0.3 * peak
-        active = probs >= threshold
+        # ---------- Select best region ----------
+        expected_frames = int(
+            self.keyword_stats.get(keyword, 0.45)
+            * self.sample_rate / self.hop_length
+        )
 
-        if active.sum() < 3:
-            center = int(np.argmax(probs))
-        else:
-            idxs = np.arange(len(probs))
-            center = int((idxs[active] * probs[active]).sum() /
-                         probs[active].sum())
+        best_score = -1
+        best_region = None
 
-        # ---------- Duration estimation ----------
-        dur_sec = self.keyword_stats.get(keyword, 0.45)
-        dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
+        for s, e in regions:
+            region_probs = probs[s:e]
+            mean_p = region_probs.mean()
+            dur_penalty = abs((e - s) - expected_frames) / expected_frames
+            score = mean_p - 0.3 * dur_penalty
 
-        start = center - dur_frames // 2
-        end = center + dur_frames // 2
+            if score > best_score:
+                best_score = score
+                best_region = (s, e, region_probs.max())
 
-        start = max(0, start)
-        end = min(len(probs) - 1, end)
+        s, e, conf = best_region
 
-        start_time = start * self.hop_length / self.sample_rate
-        end_time = end * self.hop_length / self.sample_rate
+        start_time = s * self.hop_length / self.sample_rate
+        end_time = e * self.hop_length / self.sample_rate
 
         return (
             round(float(start_time), 3),
             round(float(end_time), 3),
-            round(float(peak), 3)
+            round(float(conf), 3)
         )
