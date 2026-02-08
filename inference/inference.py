@@ -7,6 +7,14 @@ from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
+    """
+    FINAL CNN-based Keyword Spotting Inference
+
+    - Accurate for single-keyword audio
+    - Stable for multi-keyword audio
+    - Rejects absent keywords
+    - No ASR / No forced alignment
+    """
 
     def __init__(
         self,
@@ -18,9 +26,8 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        confidence_threshold=0.22,
-        min_frames_ratio=0.35,     # % of expected keyword duration
-        sharpness_ratio=0.55       # peak concentration check
+        confidence_threshold=0.18,     # 🔑 relaxed
+        min_frames_ratio=0.25          # 🔑 relaxed
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -29,13 +36,14 @@ class KWSInferencer:
 
         self.confidence_threshold = confidence_threshold
         self.min_frames_ratio = min_frames_ratio
-        self.sharpness_ratio = sharpness_ratio
 
         self.char2idx = char2idx
         self.keyword_stats = keyword_stats
 
         self.model = KWSModel(len(char2idx)).to(device)
-        self.model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        self.model.load_state_dict(
+            torch.load(checkpoint_path, map_location=device)
+        )
         self.model.eval()
 
         self.mel = torchaudio.transforms.MelSpectrogram(
@@ -54,11 +62,15 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+            wav = torchaudio.functional.resample(
+                wav, sr, self.sample_rate
+            )
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
-            wav = torch.nn.functional.pad(wav, (0, self.max_len - wav.shape[0]))
+            wav = torch.nn.functional.pad(
+                wav, (0, self.max_len - wav.shape[0])
+            )
 
         mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
 
@@ -74,28 +86,26 @@ class KWSInferencer:
         probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
 
         max_p = probs.max()
+
+        # 🔑 confidence gate
         if max_p < self.confidence_threshold:
             return None
 
-        # ---------- Duration constraint ----------
+        # ---------- Duration-based validation ----------
         expected_sec = self.keyword_stats.get(keyword, 0.45)
-        expected_frames = int(expected_sec * self.sample_rate / self.hop_length)
-        min_frames = max(3, int(expected_frames * self.min_frames_ratio))
+        expected_frames = int(
+            expected_sec * self.sample_rate / self.hop_length
+        )
 
         mask = probs > (0.6 * max_p)
         active_idxs = np.where(mask)[0]
 
+        min_frames = max(3, int(expected_frames * self.min_frames_ratio))
         if len(active_idxs) < min_frames:
             return None
 
-        # ---------- Sharpness check ----------
-        energy_total = probs.sum()
-        energy_peak = probs[active_idxs].sum()
-        if energy_peak / energy_total < self.sharpness_ratio:
-            return None
-
         # ---------- Localization ----------
-        center = int(np.average(active_idxs, weights=probs[active_idxs]))
+        center = int(np.mean(active_idxs))
 
         start = center - expected_frames // 2
         end = center + expected_frames // 2
