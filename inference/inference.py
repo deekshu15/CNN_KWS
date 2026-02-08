@@ -87,7 +87,10 @@ class KWSInferencer:
         std_p = probs.std() + 1e-6
 
         # Absolute + relative confidence check
-        if max_p < self.base_threshold or max_p < mean_p + self.contrast_k * std_p:
+        if max_p < self.base_threshold:
+            return "keyword not found"
+
+        if max_p < np.percentile(probs, 95):
             return "keyword not found"
 
         # Temporal persistence
