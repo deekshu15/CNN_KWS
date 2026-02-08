@@ -8,66 +8,110 @@ from CNN_KWS.models.kws_model import KWSModel
 
 class KWSInferencer:
     """
-    FINAL LOCKED INFERENCE FILE
-    ---------------------------
-    CNN-based keyword spotting with temporal localization
-
-    Rules:
-    - If keyword is present → return timestamps
-    - If keyword is NOT present → return "keyword not found"
-    - No ASR
-    - No forced alignment
-    - Stable for single-word & multi-word audio
+    CNN-based Keyword Spotting Inference
+    Supports both single-word and multi-word audio
     """
 
     def __init__(
         self,
         checkpoint_path,
         char2idx,
-        keyword_stats=None,     # optional (kept for API safety)
+        keyword_stats,
         device="cpu",
         sample_rate=16000,
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        base_threshold=0.18,   # tuned for your trained model
-        min_region_frames=6    # ~60 ms (short words safe)
+        base_threshold=0.25,
     ):
         self.device = device
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)
-
         self.base_threshold = base_threshold
-        self.min_region_frames = min_region_frames
 
         self.char2idx = char2idx
-        self.keyword_stats = keyword_stats or {}
+        self.keyword_stats = keyword_stats
 
-        # Load model
         self.model = KWSModel(len(char2idx)).to(device)
         self.model.load_state_dict(
             torch.load(checkpoint_path, map_location=device)
         )
         self.model.eval()
 
-        # Mel frontend
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate,
             n_mels=n_mels,
             hop_length=hop_length,
         ).to(device)
 
-    # ======================================================
     @torch.no_grad()
-    def infer(self, wav_path, keyword):
-        """
-        Infer a single keyword in an audio file.
-        Returns:
-            dict(start, end, confidence, frames) OR "keyword not found"
-        """
+    def _infer_single(self, mel, keyword, used_mask=None):
+        kw = torch.tensor(
+            [self.char2idx[c] for c in keyword if c in self.char2idx],
+            dtype=torch.long,
+            device=self.device,
+        ).unsqueeze(0)
 
-        # ---------- Load audio ----------
+        if kw.shape[1] == 0:
+            return None
+
+        kl = torch.tensor([kw.shape[1]], device=self.device)
+
+        probs = torch.sigmoid(self.model(mel, kw, kl))[0].cpu().numpy()
+
+        if used_mask is not None:
+            probs = probs * (1.0 - used_mask)
+
+        if probs.max() < self.base_threshold:
+            return None
+
+        # ---- find best contiguous segment ----
+        thresh = 0.4 * probs.max()
+        active = probs > thresh
+
+        segments = []
+        start = None
+        for i, a in enumerate(active):
+            if a and start is None:
+                start = i
+            elif not a and start is not None:
+                segments.append((start, i))
+                start = None
+        if start is not None:
+            segments.append((start, len(probs)))
+
+        if not segments:
+            return None
+
+        best_seg = None
+        best_score = -1
+
+        for s, e in segments:
+            seg_probs = probs[s:e]
+            score = seg_probs.mean() * (e - s)
+            if score > best_score:
+                best_score = score
+                best_seg = (s, e)
+
+        s, e = best_seg
+
+        dur_sec = self.keyword_stats.get(keyword, 0.45)
+        dur_frames = int(dur_sec * self.sample_rate / self.hop_length)
+
+        center = (s + e) // 2
+        s = max(center - dur_frames // 2, 0)
+        e = min(center + dur_frames // 2, len(probs))
+
+        return {
+            "start": round(s * self.hop_length / self.sample_rate, 3),
+            "end": round(e * self.hop_length / self.sample_rate, 3),
+            "confidence": round(float(probs[s:e].max()), 3),
+            "start_frame": s,
+            "end_frame": e,
+        }
+
+    def infer(self, wav_path, keyword):
         wav, sr = sf.read(wav_path)
         wav = torch.tensor(wav, dtype=torch.float32)
 
@@ -75,9 +119,7 @@ class KWSInferencer:
             wav = wav.mean(dim=1)
 
         if sr != self.sample_rate:
-            wav = torchaudio.functional.resample(
-                wav, sr, self.sample_rate
-            )
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
 
         wav = wav[:self.max_len]
         if wav.shape[0] < self.max_len:
@@ -87,82 +129,33 @@ class KWSInferencer:
 
         mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
 
-        # ---------- Encode keyword ----------
-        kw_ids = [self.char2idx[c] for c in keyword if c in self.char2idx]
-        if len(kw_ids) == 0:
-            return "keyword not found"
+        return self._infer_single(mel, keyword)
 
-        kw = torch.tensor(kw_ids, device=self.device).unsqueeze(0)
-        kl = torch.tensor([len(kw_ids)], device=self.device)
-
-        # ---------- Forward ----------
-        probs = torch.sigmoid(
-            self.model(mel, kw, kl)
-        )[0].cpu().numpy()
-
-        # ---------- Local region detection ----------
-        mask = probs >= self.base_threshold
-
-        segments = []
-        start = None
-
-        for i, v in enumerate(mask):
-            if v and start is None:
-                start = i
-            elif not v and start is not None:
-                if i - start >= self.min_region_frames:
-                    segments.append((start, i))
-                start = None
-
-        if start is not None and len(mask) - start >= self.min_region_frames:
-            segments.append((start, len(mask)))
-
-        # ❌ Keyword truly absent
-        if len(segments) == 0:
-            return "keyword not found"
-
-        # ---------- Choose best segment ----------
-        best_seg = max(
-            segments,
-            key=lambda s: probs[s[0]:s[1]].mean()
-        )
-
-        s, e = best_seg
-        confidence = float(probs[s:e].max())
-
-        # ---------- Convert to time ----------
-        start_time = s * self.hop_length / self.sample_rate
-        end_time = e * self.hop_length / self.sample_rate
-
-        return {
-            "start": round(start_time, 3),
-            "end": round(end_time, 3),
-            "confidence": round(confidence, 3),
-            "start_frame": int(s),
-            "end_frame": int(e),
-            "num_frames": len(probs)
-        }
-
-    # ======================================================
     def infer_sequence(self, wav_path, keywords):
-        """
-        Infer multiple keywords from the same audio file.
-        Ensures order stability and prevents overlap confusion.
-        """
+        wav, sr = sf.read(wav_path)
+        wav = torch.tensor(wav, dtype=torch.float32)
 
+        if wav.ndim == 2:
+            wav = wav.mean(dim=1)
+
+        if sr != self.sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+
+        wav = wav[:self.max_len]
+        if wav.shape[0] < self.max_len:
+            wav = torch.nn.functional.pad(
+                wav, (0, self.max_len - wav.shape[0])
+            )
+
+        mel = self.mel(wav.to(self.device)).transpose(0, 1).unsqueeze(0)
+
+        used_mask = np.zeros(mel.shape[1])
         results = {}
-        used_until = 0
 
         for kw in keywords:
-            out = self.infer(wav_path, kw)
-
-            # Enforce forward-only progression
-            if isinstance(out, dict) and out["start_frame"] < used_until:
-                out = "keyword not found"
-
-            results[kw] = out
-
-            if isinstance(out, dict):
-                used_until = out["end_frame"]
+            res = self._infer_single(mel, kw, used_mask)
+            if res is not None:
+                used_mask[res["start_frame"]:res["end_frame"]] = 1.0
+            results[kw] = res
 
         return results
