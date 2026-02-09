@@ -70,8 +70,4 @@ desktop.ini
 *.swo
 *~
 
-# CSV files (keep metadata but exclude if too large)
-# data/*.csv  # Uncomment if metadata_fixed.csv is too large
-
-# FFmpeg
 ffmpeg/

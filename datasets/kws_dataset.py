@@ -17,9 +17,6 @@ class KWSDataset(Dataset):
     ):
         self.df = pd.read_csv(metadata_csv)
 
-        # 🔴 IMPORTANT: NO folder filtering anymore
-        # Metadata is already folder-specific and aligned
-
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_len = int(sample_rate * max_seconds)

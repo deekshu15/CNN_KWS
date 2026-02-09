@@ -3,9 +3,6 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 def collate(batch):
-    """
-    batch: list of (mel [T, F], kw [L], labels [T])
-    """
 
     mels = []
     kws = []
@@ -28,11 +25,11 @@ def collate(batch):
         mask[:T] = 1.0
         masks.append(mask)
 
-    mels = pad_sequence(mels, batch_first=True)      # [B, T, F]
-    labels = pad_sequence(labels, batch_first=True)  # [B, T]
-    masks = torch.stack(masks)                        # [B, T]
+    mels = pad_sequence(mels, batch_first=True)      
+    labels = pad_sequence(labels, batch_first=True)  
+    masks = torch.stack(masks)                        
 
-    kws = pad_sequence(kws, batch_first=True)         # [B, L]
+    kws = pad_sequence(kws, batch_first=True)         
     kw_lens = torch.tensor(kw_lens)
 
     return mels, kws, kw_lens, labels, masks

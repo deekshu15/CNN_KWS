@@ -18,8 +18,8 @@ class KWSInferencer:
         n_mels=80,
         hop_length=160,
         max_seconds=10.0,
-        confidence_threshold=0.18,   # absolute confidence gate
-        min_frames_ratio=0.25        # duration validation
+        confidence_threshold=0.18,   
+        min_frames_ratio=0.25        
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -80,16 +80,12 @@ class KWSInferencer:
         max_p = probs.max()
         mean_p = probs.mean()
 
-        # 1️⃣ Absolute confidence gate
         if max_p < self.confidence_threshold:
             return None
 
-        # 2️⃣ Relative confidence gate (CRITICAL FIX)
-        # Keyword must stand out from background
         if max_p < mean_p * 2.2:
             return None
 
-        # ---------- Duration-based validation ----------
         expected_sec = self.keyword_stats.get(keyword, 0.45)
         expected_frames = int(
             expected_sec * self.sample_rate / self.hop_length
@@ -102,7 +98,6 @@ class KWSInferencer:
         if len(active_idxs) < min_frames:
             return None
 
-        # ---------- Localization ----------
         center = int(np.mean(active_idxs))
 
         start = center - expected_frames // 2
