@@ -1,35 +1,113 @@
 # CNN Keyword Spotting (KWS)
 
-## Problem Statement
-Build a Keyword Spotting (KWS) system that predicts the start and end
-timestamps of a given keyword in an audio file without using ASR,
-pretrained models, or external datasets.
+## Overview
+This project implements a CNN-based Keyword Spotting (KWS) system that predicts
+the **start and end timestamps of a given keyword in an audio file**.
+
+### Constraints Followed
+-  No Automatic Speech Recognition (ASR)
+-  No pretrained models
+-  No external datasets
+
+The model is trained end-to-end using raw audio and keyword supervision.
+
+---
 
 ## Project Structure
-CNN_KWS_PROJECT/
-├── CNN_KWS/          # Core implementation (dataset, model, training, inference)
-├── checkpoints/      # Trained model checkpoints
-├── data/             # (Not included) Large datasets used in Colab
-├── evaluate.py       # Evaluation script
-├── requirements.txt  # Dependencies
+
+CNN_KWS/
+├── models/ # CNN model architecture
+├── datasets/ # Dataset and data loading logic
+├── train/ # Training utilities
+├── inference/ # Inference pipeline
+├── utils/ # Audio & keyword encoding utilities
+│
+├── evaluate.py
+├── evaluate_kws_accuracy.py
+├── test_dataset_load.py
+├── requirements.txt
+└── README.md
+
+
+The `CNN_KWS/` directory contains **clean, reusable core code**.
+All experimental work is kept separate.
+
+---
+
+## Training & Evaluation (Google Colab)
+
+Due to the **large size of the audio dataset** and the need for **GPU support**,
+model training and evaluation were performed in **Google Colab**.
+
+The **complete runnable pipeline** (dataset preparation, training, inference,
+and evaluation) is provided in the Colab notebook below:
+
+👉 **Colab Notebook (Final Pipeline)**  
+https://colab.research.google.com/drive/YOUR_NOTEBOOK_LINK_HERE
+
+The notebook includes:
+- Loading audio and metadata from Google Drive
+- Metadata alignment and validation
+- Incremental folder-wise training
+- Final checkpoint generation
+- Inference and quantitative evaluation
+
+---
 
 ## Dataset Handling
-Due to the large size of the audio dataset, all audio files and metadata
-are stored in Google Drive and used in Google Colab for training and
-evaluation. Only sample outputs and trained checkpoints are included
-in this repository.
 
-## How to Run Inference
+The full dataset (audio files and metadata CSVs) is **not included in this
+repository** due to size constraints.
+
+During Colab execution, the following paths are used:
+
+- **Final checkpoint**
+/content/drive/MyDrive/KWS_CHECKPOINTS/kws_folder12.pt
+
+
+- **Metadata**
+/content/metadata_folder*_aligned.csv
+
+
+This separation keeps the repository lightweight while maintaining full
+reproducibility through the provided notebook.
+
+---
+
+## Checkpoints
+
+The results reported in this project use the **final checkpoint trained in
+Google Colab**.
+
+Initial debugging experiments were performed locally, but **all final training,
+inference, and evaluation results are based on the Colab-trained checkpoint**.
+
+---
+
+## Running Inference (Colab)
+
+Inference is demonstrated inside the Colab notebook using:
+
 ```python
-from CNN_KWS.inference.inference import KWSInferencer
-from CNN_KWS.utils.keyword_encoder import keyword_stats
-from CNN_KWS.utils.audio_encoder import char2idx
+inferencer.infer(wav_path, keyword)
+This verifies end-to-end keyword localization on unseen audio samples.
 
-inferencer = KWSInferencer(
-    checkpoint_path="checkpoints/kws_folder12.pt",
-    char2idx=char2idx,
-    keyword_stats=keyword_stats,
-    device="cpu"
-)
+Notes
+Local scripts in this repository are provided for code sanity checks only
 
-inferencer.infer("sample.wav", "FRIGHTEN")
+Full reproduction is intended via the Colab notebook
+
+The repository focuses on clarity, structure, and core implementation
+
+Summary
+✔ Clean modular codebase
+
+✔ Reproducible Colab pipeline
+
+✔ No prohibited resources used
+
+✔ Final results based on Colab-trained model
+
+This project reflects a practical, real-world ML workflow where experimentation,
+training, and evaluation are separated from the core implementation.
+

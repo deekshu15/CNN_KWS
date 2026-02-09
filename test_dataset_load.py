@@ -1,6 +1,11 @@
-from datasets.kws_dataset import KWSDataset
+from CNN_KWS.datasets.kws_dataset import KWSDataset
+from CNN_KWS.utils.keyword_encoder import char2idx
 
-ds = KWSDataset("data/metadata_fixed.csv", folder_id=1)
+ds = KWSDataset(
+    metadata_csv="data/metadata_sample.csv",
+    char2idx=char2idx
+)
+
 print("Samples:", len(ds))
 
 mel, kw, y = ds[0]
