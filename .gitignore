@@ -48,11 +48,11 @@ data/audio/
 *.mp3
 *.flac
 
-# Model checkpoints (optional - can be excluded if too large)
-checkpoints/
-*.pt
-*.pth
-*.ckpt
+# Model checkpoints (tracked via Git LFS)
+!checkpoints/
+!checkpoints/**/*.pt
+!checkpoints/**/*.pth
+!checkpoints/**/*.ckpt
 
 # Logs
 *.log
