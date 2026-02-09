@@ -7,14 +7,6 @@ from CNN_KWS.models.kws_model import KWSModel
 
 
 class KWSInferencer:
-    """
-    FINAL CNN-based Keyword Spotting Inference
-
-    - Accurate timestamps when keyword is present
-    - Consistent rejection when keyword is absent
-    - Stable for multi-word utterances
-    - No ASR / No forced alignment
-    """
 
     def __init__(
         self,
@@ -120,10 +112,6 @@ class KWSInferencer:
         end = min(end, len(probs) - 1)
 
         return {
-            "start": round(start * self.hop_length / self.sample_rate, 3),
-            "end": round(end * self.hop_length / self.sample_rate, 3),
-            "confidence": round(float(max_p), 3),
-            "start_frame": int(start),
-            "end_frame": int(end),
-            "num_frames": len(probs),
+            "start": round(start * self.hop_length / self.sample_rate, 5),
+            "end": round(end * self.hop_length / self.sample_rate, 5),
         }
